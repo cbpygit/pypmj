@@ -386,7 +386,7 @@ class Simulation(object):
         # are of types that could be stored to H5
         if stored_keys is None:
             stored_keys = []
-            for key, val in keys.iteritems():
+            for key, val in keys.items():
                 if isinstance(val, _H5_STORABLE_TYPES):
                     stored_keys.append(key)
         self.stored_keys = stored_keys
@@ -494,6 +494,7 @@ class Simulation(object):
         wdir = self.working_dir()
         if not os.path.exists(wdir):
             os.makedirs(wdir)
+        self.keys['wdir'] = wdir
         
         if pp_file is None:
             mode = 'solve'
@@ -907,10 +908,9 @@ class Simulation(object):
         if NEW_DAEMON_DETECTED:
             self.solve(**jcm_solve_kwargs)
             if hasattr(jcm, 'Resultbag'):
-                results = daemon.wait(return_style='new',
-                                      resultbag=self._resultbag)
+                results = daemon.wait(resultbag=self._resultbag)
             else:
-                results = daemon.wait(return_style='new')
+                results = daemon.wait()
             result = results.values()[0]
             self._set_jcm_results_and_logs(result)
             ret1, ret2 = (result['results'], result['logs'])
@@ -952,10 +952,9 @@ class Simulation(object):
                                additional_keys=additional_keys_for_pps,
                                **jcm_solve_kwargs)
                     if hasattr(jcm, 'Resultbag'):
-                        pp_results = daemon.wait(return_style='new',
-                                                 resultbag=self._resultbag)
+                        pp_results = daemon.wait(resultbag=self._resultbag)
                     else:
-                        pp_results = daemon.wait(return_style='new')
+                        pp_results = daemon.wait()
                     pp_result = pp_results.values()[0]
                     # Add the post process results
                     self._add_post_process_results(pp_result)
@@ -1016,7 +1015,7 @@ class ResourceManager(object):
         """Saves the current resource configuration internally, allowing to
         reset it to this state later."""
         self._saved_nicks = []
-        for nick, resource in self.resources.iteritems():
+        for nick, resource in self.resources.items():
             resource.save_m_n()
             self._saved_nicks.append(nick)
     
@@ -2060,7 +2059,7 @@ class SimulationSet(object):
         # Load the data
         df = self.store[which]
         dict_ = {}
-        for col, series in df.iteritems():
+        for col, series in df.items():
             vals = series.dropna()
             if len(vals) == 1:
                 dict_[col] = vals.iat[0]
@@ -2466,7 +2465,7 @@ class SimulationSet(object):
                 if sim.rerun_JCMgeo or force_geo_run:
                     self.compute_geometry(sim, **jcm_geo_kwargs)
                     force_geo_run = False
-
+                
                 # Start to solve the simulation and receive a job ID
                 job_id = sim.solve(**jcm_solve_kwargs)
                 self.logger.debug(
@@ -2563,16 +2562,15 @@ class SimulationSet(object):
         while nFinished < nTotal:
             # wait until any of the simulations is finished
             if hasattr(jcm, 'Resultbag'):
-                results = daemon.wait(ids_to_wait_for, break_condition='any',
-                                      return_style='new',
+                results, result_logs = daemon.wait(ids_to_wait_for, break_condition='any',
                                       resultbag=self._resultbag)
             else:
-                results = daemon.wait(ids_to_wait_for, break_condition='any',
-                                      return_style='new')
+                results, result_logs = daemon.wait(ids_to_wait_for, break_condition='any')
 
             # Get lists for the IDs of the finished jobs and the corresponding
             # simulation numbers
             finished_ids = list(results.keys())
+            
             for id_ in finished_ids:
                 sim_number = ids_to_sim_number[id_]
                 sim = self.simulations[sim_number]
@@ -2646,7 +2644,7 @@ class SimulationSet(object):
                                                     resultbag=self._resultbag)
             for line in output:
                 logger_JCMsolve.debug(line)
-
+                
             # Get lists for the IDs of the finished jobs and the corresponding
             # simulation numbers
             finishedIDs = []
