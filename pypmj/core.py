@@ -809,7 +809,7 @@ class Simulation(object):
         """Computes the geometry (i.e. runs jcm.geo) for this simulation.
         The jcm_kwargs are directly passed to jcm.geo, except for
         `project_dir`, `keys` and `working_dir`, which are set automatically
-        (ignored if provided).
+        (ignored if provided). Returns False if JCMgeo fails, True otherwise.
         """
         self.logger.debug('Computing geometry.')
         # Copy project to its working directory
@@ -838,13 +838,20 @@ class Simulation(object):
         _thisdir = os.getcwd()
         os.chdir(self.project.working_dir)
         with utils.Capturing() as output:
-            jcm.geo(project_dir=self.project.working_dir,
-                    keys=self.keys,
-                    working_dir=self.project.working_dir,
-                    **jcm_kwargs)
+            try:
+                jcm.geo(project_dir=self.project.working_dir,
+                        keys=self.keys,
+                        working_dir=self.project.working_dir,
+                        **jcm_kwargs)
+            except RuntimeError as e:
+                self.logger.warn('Failed to compute geometry for simulation {}. JCMgeo returned "{}".'.format(self.number, str(e)))
+                return False
+                
         for line in output:
             logger_JCMgeo.debug(line)
         os.chdir(_thisdir)
+        
+        return True
     
     def solve_standalone(self, processing_func=None, wdir_mode='keep',
                          run_post_process_files=None, resource_manager=None,
@@ -1213,6 +1220,16 @@ class SimulationSet(object):
         the results and logs are kept for each simulation. Set this parameter
         to true to minimize the memory usage. Caution: you will loose all the
         `jcm_results` and `logs` in the `Simulation`-instances.
+    skip_existent_simulations_by_folder : bool, default False
+        Determines whether to skip simulations by the existence of a
+        project_results/fieldbag.jcm file in the storage folder of a respective
+        simulation with index i. The storage folder of a single simulation i is
+        given by the parameter `storage_folder` and a subfolder 'simulation[i]'.
+        Setting this parameter to True is handy if a simulation series is to be
+        continued when no HDF5 store is present. Simulation keys `geometry` and
+        `parameters` must not have changed when restarting the simulation series!
+        Otherwise, simulation indices might not match the assumed folder
+        structure any longer.
     """
 
     # Names of the groups in the HDF5 store which are used to store metadata
@@ -1224,13 +1241,14 @@ class SimulationSet(object):
                  use_resultbag=False, transitional_storage_base=None,
                  combination_mode='product', check_version_match=True,
                  resource_manager=None, store_logs=False, 
-                 minimize_memory_usage=False):
+                 minimize_memory_usage=False, skip_existent_simulations_by_folder=False):
         self.logger = logging.getLogger('core.' + self.__class__.__name__)
 
         # Save initialization arguments into namespace
         self.combination_mode = combination_mode
         self.store_logs = store_logs
         self.minimize_memory_usage = minimize_memory_usage
+        self.skip_existent_simulations_by_folder = skip_existent_simulations_by_folder
         
         # Analyze the provided keys
         self._check_keys(keys)
@@ -1804,15 +1822,28 @@ class SimulationSet(object):
         
         precheck = self._precheck_store()
         self.logger.debug('Result of the store pre-check: {}'.format(precheck))
-        if precheck == 'Empty':
-            self.finished_sim_numbers = []
-        if precheck == 'Extended Check':
+        if precheck == 'Empty' or self.skip_existent_simulations_by_folder:
+            stored_sim_numbers = []
+            
+            if self.skip_existent_simulations_by_folder:
+                for i in range(self.num_sims):
+                    simdir = _default_sim_wdir(self.storage_dir, self.simulations[i].number)
+                    if os.path.exists(os.path.join(simdir, 'project_results/fieldbag.jcm')):
+                        stored_sim_numbers.append(i)
+                
+            self.finished_sim_numbers = stored_sim_numbers
+            if len(self.finished_sim_numbers) > 0:
+                self.logger.info('Ignoring HDF5 store. Determining already finished simulations by ' +
+                             'existence of fieldbag.jcm instead. Number of found simulations: {}'.format(
+                                 len(self.finished_sim_numbers)))
+            
+        if precheck == 'Extended Check' and not self.skip_existent_simulations_by_folder:
             self.logger.info('Running extended check ...')
             self._extended_store_check()
             self.logger.info('Found matches in the extended check of the ' +
                              'HDF5 store. Number of stored simulations: {}'.
                              format(len(self.finished_sim_numbers)))
-        elif precheck == 'Match':
+        elif precheck == 'Match' and not self.skip_existent_simulations_by_folder:
             stored_sim_numbers = list(self.get_store_data().index)
             if len(stored_sim_numbers) > self.num_sims:
                 if fix_h5_duplicated_rows:
@@ -2290,7 +2321,7 @@ class SimulationSet(object):
 
     def compute_geometry(self, simulation, **jcm_kwargs):
         """Computes the geometry (i.e. runs jcm.geo) for a specific simulation
-        of the simulation set.
+        of the simulation set. Returns False in case of an error, True otherwise.
         Parameters
         ----------
         simulation : Simulation or int
@@ -2307,10 +2338,10 @@ class SimulationSet(object):
             raise ValueError('`simulation` must be a Simulation of the ' +
                              'current SimulationSet or a simulation index' +
                              ' (int).')
-            return
+            return False
         
         # Call the compute_geometry-method of the simulation
-        simulation.compute_geometry(**jcm_kwargs)
+        return simulation.compute_geometry(**jcm_kwargs)
 
     def solve_single_simulation(self, simulation, compute_geometry=True,
                                 run_post_process_files=None, 
@@ -2462,17 +2493,26 @@ class SimulationSet(object):
             # Start the simulation if it is not already finished
             if not sim.number in self.finished_sim_numbers:
                 # Compute the geometry if necessary
+                geo_succeeded = True
                 if sim.rerun_JCMgeo or force_geo_run:
-                    self.compute_geometry(sim, **jcm_geo_kwargs)
-                    force_geo_run = False
+                    if self.compute_geometry(sim, **jcm_geo_kwargs):
+                        force_geo_run = False
+                    else:
+                        geo_succeeded = False;
                 
-                # Start to solve the simulation and receive a job ID
-                job_id = sim.solve(**jcm_solve_kwargs)
-                self.logger.debug(
-                    'Queued simulation {0} of {1} with job_id {2}'.
-                    format(i + 1, self.num_sims, sim.job_id))
-                job_ids.append(job_id)
-                ids_to_sim_number[job_id] = sim.number
+                if geo_succeeded:
+                    # Start to solve the simulation and receive a job ID
+                    job_id = sim.solve(**jcm_solve_kwargs)
+                    self.logger.debug(
+                        'Queued simulation {0} of {1} with job_id {2}'.
+                        format(i + 1, self.num_sims, sim.job_id))
+                    job_ids.append(job_id)
+                    ids_to_sim_number[job_id] = sim.number
+                else:
+                    sim.status = 'Skipped'
+                    self.logger.debug(
+                        'Skipping simulation {0} of {1}'.
+                        format(i + 1, self.num_sims))
             else:
                 # Set `force_geo_run` to True if this finished simulation would
                 # have caused to compute the geometry
